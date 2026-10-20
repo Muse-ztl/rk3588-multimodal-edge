@@ -50,23 +50,6 @@ frame=137  ttft=1409ms total=3786ms  人员密集区域，人车距离过近，�
                 └───────────────────────────────────────────────────────┘
 ```
 
-工程要点（都是踩过坑才这么写的）：
-
-- **RKNN 输入必须是 NHWC**：`rknn_inputs_set` 的 normalize 只支持 NHWC 源布局，喂 NCHW
-  直接报 `unsupported src layout for normalize`，且**返回全零**（不会崩），表现为“检测不到任何目标”。
-- **RKNN 输出是 NHWC，检测头要 NCHW**：C++ 里按 head 声明的形状反推是否转置
-  （`shape[1]==C && shape[3]==H`），不依赖固定版本行为。
-- **rkllm 头文件有两个版本**：板上 `/usr/include/rkllm.h` 是 1.0（无 `RKLLMInput`、
-  `extend_param`），必须用 `~/rknn-llm/.../include/rkllm.h`（1.2.3）；库也要用
-  `/usr/local/lib/librkllmrt.so`，`/usr/lib` 那份是旧版。CMake 里强制了优先路径。
-- **`extend_param.n_batch` 必须显式设 1**：默认 0 会让 `rkllm_init` 直接崩。
-- **规则与语义分离**：几何判断（越界、人车过近）在 `scene.cpp`，LLM 只把事实讲成人话；
-  1.5B 做不了几何推理，这样切职责既准又省 token。
-- **背压而非排队**：LLM 一次生成 4 秒，期间 CV 已产出十几帧，旧观测对“当前场景”无意义，
-  直接丢弃（`observations_dropped=42`）。
-- **CPU 亲和性**：CV 线程绑 A55 小核，把 4 个 A76 留给 rkllm（它默认使能 CPU4-7）。
-  实测 CV 占大核时 LLM TTFT 会从 1.2s 恶化到 8.8s。
-
 ## 目录
 
 ```
