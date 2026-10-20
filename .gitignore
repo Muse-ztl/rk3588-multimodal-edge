@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.so
+build/
+output/
+.venv/
+venv/
+# 模型权重不入库：backbone.rknn / detection.onnx 由 scripts/ 从官方 checkpoint 导出
+models/*.rknn
+models/*.onnx
+*.rknn
+*.onnx
+*.pth
+data/*.mp4

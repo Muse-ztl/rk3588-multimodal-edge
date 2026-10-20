@@ -1,0 +1,19 @@
+{
+  "affinity": "cpu_affinity=unchanged(no big core)",
+  "frames_read": 180,
+  "infer_frames": 45,
+  "cv_total_p50_ms": 258.76747299992076,
+  "cv_total_p90_ms": 291.5572966000127,
+  "backbone_npu_p50_ms": 221.6764409999996,
+  "head_cpu_p50_ms": 27.00126199999886,
+  "cv_fps_effective": 3.774134617782962,
+  "llm_calls": 3,
+  "llm_ttft_p50_ms": 1060.8591939999314,
+  "llm_total_p50_ms": 4462.147750999975,
+  "llm_total_p90_ms": 4660.547379799937,
+  "e2e_p50_ms": 4493.747234344482,
+  "e2e_p90_ms": 4666.99743270874,
+  "observations_published": 45,
+  "observations_dropped": 42,
+  "frames_while_llm_busy": 44
+}
