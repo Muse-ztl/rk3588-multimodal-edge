@@ -51,14 +51,14 @@ cmake --build build -j4
 
 Orange Pi 5 Pro（RK3588S，16GB），CV 绑 A55、backbone 绑 NPU core0，stride=4：
 
-| 阶段 | p50 | p95 |
-|---|---|---|
-| Backbone（NPU） | 222 ms | 238 ms |
-| Transformer + 检测头（CPU 4 线程） | 42 ms | 47 ms |
-| 单帧检测 | 279 ms | 297 ms |
-| LLM 首 token | 1.36 s | 1.38 s |
-| 单次生成 | 4.39 s | 4.42 s |
-| 端到端 | 4.43 s | 4.44 s |
+| 阶段 | 数值 |
+|---|---|
+| Backbone（NPU） | 222 ms p50 / 238 ms p95 |
+| Transformer + 检测头（CPU 4 线程） | 42 ms p50 / 47 ms p95 |
+| 单帧检测 | 279 ms p50 / 297 ms p95 |
+| LLM 首 token | 1.36 s p50（3 次：1.50 / 1.30 / 1.36） |
+| 单次生成 | 4.39 s p50（3 次：6.03 / 4.39 / 3.70） |
+| 端到端 | 4.43 s p50 |
 
 180 帧视频、45 次推理、3 次 LLM 调用；期间丢掉 42 条观测，说明单槽背压确实在工作。
 原始数据在 `assets/report_demo.json`，三句预警在 `assets/llm_traces_demo.jsonl`。
