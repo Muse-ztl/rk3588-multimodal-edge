@@ -19,7 +19,7 @@ class SplitRFDETR {
  public:
   SplitRFDETR(const std::string& backbone_rknn, const std::string& head_onnx,
               float threshold = 0.45f, int num_select = 300, int ort_threads = 4,
-              int npu_core_mask = 0, int input_size = 0);
+              int npu_core_mask = 0, int input_size = 0, bool zero_copy = true);
   ~SplitRFDETR();
 
   SplitRFDETR(const SplitRFDETR&) = delete;

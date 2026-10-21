@@ -52,7 +52,63 @@ struct RknnCtx {
   rknn_tensor_attr in_attr{};
   rknn_tensor_attr out_attr[8]{};
   bool alive = false;
+  bool zero_copy = false;
+  rknn_tensor_mem* in_mem = nullptr;
+  std::vector<rknn_tensor_mem*> out_mem;
+  std::vector<cv::Mat> out_f32;
 };
+
+void release_mem(RknnCtx& c) {
+  for (auto* m : c.out_mem) {
+    if (m != nullptr) rknn_destroy_mem(c.ctx, m);
+  }
+  c.out_mem.clear();
+  if (c.in_mem != nullptr) {
+    rknn_destroy_mem(c.ctx, c.in_mem);
+    c.in_mem = nullptr;
+  }
+}
+
+bool setup_zero_copy(RknnCtx& c, int input_hw) {
+  c.in_attr.index = 0;
+  if (rknn_query(c.ctx, RKNN_QUERY_INPUT_ATTR, &c.in_attr, sizeof(c.in_attr)) != RKNN_SUCC) {
+    return false;
+  }
+  if (c.in_attr.fmt != RKNN_TENSOR_NHWC) return false;
+  // 输入 FP16 + pass_through：C++ 已做 ImageNet 归一化，runtime 不要再算一遍
+  c.in_attr.type = RKNN_TENSOR_FLOAT16;
+  c.in_attr.size = static_cast<uint32_t>(input_hw) * input_hw * 3 * sizeof(uint16_t);
+  c.in_attr.pass_through = 1;
+  c.in_mem = rknn_create_mem(c.ctx, c.in_attr.size);
+  if (c.in_mem == nullptr || rknn_set_io_mem(c.ctx, c.in_mem, &c.in_attr) != RKNN_SUCC) {
+    release_mem(c);
+    return false;
+  }
+
+  c.out_mem.assign(c.io_num.n_output, nullptr);
+  c.out_f32.resize(c.io_num.n_output);
+  for (uint32_t i = 0; i < c.io_num.n_output; ++i) {
+    auto& a = c.out_attr[i];
+    if (a.fmt != RKNN_TENSOR_NCHW) {
+      release_mem(c);
+      return false;
+    }
+    if (a.type != RKNN_TENSOR_FLOAT16 && a.type != RKNN_TENSOR_FLOAT32) {
+      release_mem(c);
+      return false;
+    }
+    c.out_mem[i] = rknn_create_mem(c.ctx, a.size);
+    if (c.out_mem[i] == nullptr || rknn_set_io_mem(c.ctx, c.out_mem[i], &a) != RKNN_SUCC) {
+      release_mem(c);
+      return false;
+    }
+    const int C = static_cast<int>(a.dims[1]);
+    const int H = static_cast<int>(a.dims[2]);
+    const int W = static_cast<int>(a.dims[3]);
+    c.out_f32[i].create(C * H, W, CV_32F);
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------- ORT 部分
 
@@ -66,7 +122,7 @@ struct OrtHead {
 
 SplitRFDETR::SplitRFDETR(const std::string& backbone_rknn, const std::string& head_onnx,
                          float threshold, int num_select, int ort_threads,
-                         int npu_core_mask, int input_size)
+                         int npu_core_mask, int input_size, bool zero_copy)
     : threshold_(threshold), num_select_(num_select) {
   // --- backbone
   rknn_ = std::make_unique<RknnCtx>();
@@ -110,6 +166,18 @@ SplitRFDETR::SplitRFDETR(const std::string& backbone_rknn, const std::string& he
     rknn_query(rknn_->ctx, RKNN_QUERY_OUTPUT_ATTR, &rknn_->out_attr[i],
                sizeof(rknn_tensor_attr));
   }
+  if (std::getenv("MM_DEBUG_ATTR") != nullptr) {
+    const auto& a = rknn_->in_attr;
+    printf("[attr] in type=%d fmt=%d size=%u dims=[%u,%u,%u,%u]\n", a.type, a.fmt, a.size,
+           a.dims[0], a.dims[1], a.dims[2], a.dims[3]);
+    for (uint32_t i = 0; i < rknn_->io_num.n_output && i < 8; ++i) {
+      const auto& o = rknn_->out_attr[i];
+      printf("[attr] out%u type=%d fmt=%d size=%u dims=[%u,%u,%u,%u]\n", i, o.type, o.fmt,
+             o.size, o.dims[0], o.dims[1], o.dims[2], o.dims[3]);
+    }
+  }
+  rknn_->zero_copy = zero_copy && setup_zero_copy(*rknn_, input_hw_);
+  printf("[backbone] zero-copy=%s\n", rknn_->zero_copy ? "on" : "off");
 
   // --- head
   head_ = std::make_unique<OrtHead>();
@@ -130,7 +198,10 @@ SplitRFDETR::SplitRFDETR(const std::string& backbone_rknn, const std::string& he
 }
 
 SplitRFDETR::~SplitRFDETR() {
-  if (rknn_ && rknn_->alive) rknn_destroy(rknn_->ctx);
+  if (rknn_ && rknn_->alive) {
+    release_mem(*rknn_);
+    rknn_destroy(rknn_->ctx);
+  }
 }
 
 std::vector<float> SplitRFDETR::preprocess(const cv::Mat& bgr) const {
@@ -157,48 +228,89 @@ std::vector<float> SplitRFDETR::preprocess(const cv::Mat& bgr) const {
 void SplitRFDETR::run_backbone(const std::vector<float>& input,
                                std::vector<std::vector<float>>& feats,
                                std::vector<std::array<int, 4>>& shapes) {
+  const double b0 = now_ms();
   rknn_input in{};
-  in.index = 0;
-  in.buf = const_cast<float*>(input.data());
-  in.size = static_cast<uint32_t>(input.size() * sizeof(float));
-  in.type = RKNN_TENSOR_FLOAT32;
-  in.fmt = RKNN_TENSOR_NHWC;
-  in.pass_through = 0;
-  int ret = rknn_inputs_set(rknn_->ctx, 1, &in);
-  if (ret != RKNN_SUCC) throw std::runtime_error("rknn_inputs_set failed: " + std::to_string(ret));
+  if (rknn_->zero_copy) {
+    cv::Mat src(input_hw_, input_hw_, CV_32FC3, const_cast<float*>(input.data()));
+    cv::Mat dst(input_hw_, input_hw_, CV_16FC3, rknn_->in_mem->virt_addr);
+    src.convertTo(dst, CV_16F);
+    rknn_mem_sync(rknn_->ctx, rknn_->in_mem, RKNN_MEMORY_SYNC_TO_DEVICE);
+  } else {
+    in.index = 0;
+    in.buf = const_cast<float*>(input.data());
+    in.size = static_cast<uint32_t>(input.size() * sizeof(float));
+    in.type = RKNN_TENSOR_FLOAT32;
+    in.fmt = RKNN_TENSOR_NHWC;
+    in.pass_through = 0;
+    int ret = rknn_inputs_set(rknn_->ctx, 1, &in);
+    if (ret != RKNN_SUCC)
+      throw std::runtime_error("rknn_inputs_set failed: " + std::to_string(ret));
+  }
+  const double b1 = now_ms();
 
-  ret = rknn_run(rknn_->ctx, nullptr);
+  int ret = rknn_run(rknn_->ctx, nullptr);
   if (ret != RKNN_SUCC) throw std::runtime_error("rknn_run failed: " + std::to_string(ret));
-
-  std::vector<rknn_output> outs(rknn_->io_num.n_output);
-  for (uint32_t i = 0; i < rknn_->io_num.n_output; ++i) {
-    outs[i].index = i;
-    outs[i].want_float = 1;
-    outs[i].is_prealloc = 0;
-  }
-  ret = rknn_outputs_get(rknn_->ctx, rknn_->io_num.n_output, outs.data(), nullptr);
-  if (ret != RKNN_SUCC) {
-    throw std::runtime_error("rknn_outputs_get failed: " + std::to_string(ret));
-  }
+  const double b2 = now_ms();
 
   feats.clear();
   shapes.clear();
-  for (uint32_t i = 0; i < rknn_->io_num.n_output; ++i) {
-    const auto& attr = rknn_->out_attr[i];
-    const size_t n = outs[i].size / sizeof(float);
-    std::vector<float> f(n);
-    std::memcpy(f.data(), outs[i].buf, outs[i].size);
-    feats.push_back(std::move(f));
-    shapes.push_back({static_cast<int>(attr.dims[0]), static_cast<int>(attr.dims[1]),
-                      static_cast<int>(attr.dims[2]), static_cast<int>(attr.dims[3])});
+  if (rknn_->zero_copy) {
+    for (uint32_t i = 0; i < rknn_->io_num.n_output; ++i) {
+      const auto& attr = rknn_->out_attr[i];
+      rknn_mem_sync(rknn_->ctx, rknn_->out_mem[i], RKNN_MEMORY_SYNC_FROM_DEVICE);
+      const int C = static_cast<int>(attr.dims[1]);
+      const int H = static_cast<int>(attr.dims[2]);
+      const int W = static_cast<int>(attr.dims[3]);
+      const int stype = attr.type == RKNN_TENSOR_FLOAT16 ? CV_16F : CV_32F;
+      cv::Mat view(C * H, W, stype, rknn_->out_mem[i]->virt_addr);
+      view.convertTo(rknn_->out_f32[i], CV_32F);
+      const cv::Mat& f = rknn_->out_f32[i];
+      feats.emplace_back(f.ptr<float>(), f.ptr<float>() + f.total());
+      shapes.push_back({static_cast<int>(attr.dims[0]), static_cast<int>(attr.dims[1]),
+                        static_cast<int>(attr.dims[2]), static_cast<int>(attr.dims[3])});
+    }
+  } else {
+    std::vector<rknn_output> outs(rknn_->io_num.n_output);
+    for (uint32_t i = 0; i < rknn_->io_num.n_output; ++i) {
+      outs[i].index = i;
+      outs[i].want_float = 1;
+      outs[i].is_prealloc = 0;
+    }
+    ret = rknn_outputs_get(rknn_->ctx, rknn_->io_num.n_output, outs.data(), nullptr);
+    if (ret != RKNN_SUCC) {
+      throw std::runtime_error("rknn_outputs_get failed: " + std::to_string(ret));
+    }
+    const double b3 = now_ms();
+    for (uint32_t i = 0; i < rknn_->io_num.n_output; ++i) {
+      const auto& attr = rknn_->out_attr[i];
+      const size_t n = outs[i].size / sizeof(float);
+      std::vector<float> f(n);
+      std::memcpy(f.data(), outs[i].buf, outs[i].size);
+      feats.push_back(std::move(f));
+      shapes.push_back({static_cast<int>(attr.dims[0]), static_cast<int>(attr.dims[1]),
+                        static_cast<int>(attr.dims[2]), static_cast<int>(attr.dims[3])});
+    }
+    rknn_outputs_release(rknn_->ctx, rknn_->io_num.n_output, outs.data());
+    const double b4 = now_ms();
+    timing_.rknn_out_ms = b3 - b2;
+    timing_.copy_out_ms = b4 - b3;
+    timing_.rknn_in_ms = b1 - b0;
+    timing_.rknn_run_ms = b2 - b1;
+    return;
   }
-  rknn_outputs_release(rknn_->ctx, rknn_->io_num.n_output, outs.data());
+  const double b4 = now_ms();
+
+  timing_.rknn_in_ms = b1 - b0;
+  timing_.rknn_run_ms = b2 - b1;
+  timing_.rknn_out_ms = b4 - b2;
+  timing_.copy_out_ms = 0.0;
 }
 
 void SplitRFDETR::run_head(const std::vector<std::vector<float>>& feats,
                            const std::vector<std::array<int, 4>>& shapes,
                            std::vector<float>& boxes, std::vector<float>& logits) {
   Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  const double h0 = now_ms();
 
   // 先把所有输入张量的数据准备好（需要转置的在这里转），保证内存活到 Run 返回。
   std::vector<std::vector<float>> storage(head_->input_names.size());
@@ -221,6 +333,7 @@ void SplitRFDETR::run_head(const std::vector<std::vector<float>>& feats,
       storage[i] = src;
     }
   }
+  const double h1 = now_ms();
 
   std::vector<Ort::Value> inputs;
   inputs.reserve(storage.size());
@@ -236,12 +349,17 @@ void SplitRFDETR::run_head(const std::vector<std::vector<float>>& feats,
 
   auto outputs = head_->session->Run(Ort::RunOptions{nullptr}, in_names.data(), inputs.data(),
                                      inputs.size(), out_names.data(), out_names.size());
+  const double h2 = now_ms();
+
   const auto* b = outputs[0].GetTensorData<float>();
   const auto bshape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
   const auto* l = outputs[1].GetTensorData<float>();
   const auto lshape = outputs[1].GetTensorTypeAndShapeInfo().GetShape();
   boxes.assign(b, b + bshape[0] * bshape[1] * bshape[2]);
   logits.assign(l, l + lshape[0] * lshape[1] * lshape[2]);
+
+  timing_.transpose_ms = h1 - h0;
+  timing_.ort_ms = h2 - h1;
 }
 
 std::vector<Detection> SplitRFDETR::postprocess(const std::vector<float>& boxes,

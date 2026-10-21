@@ -16,6 +16,7 @@
 #include "json.h"
 #include "scene.h"
 #include "stats.h"
+#include "sysinfo.h"
 
 namespace mm {
 namespace {
@@ -221,6 +222,7 @@ Stats Pipeline::run(double duration_s) {
   slot_cv_.notify_all();
   llm_thread.join();
   trace_file_.close();
+  const SysSnapshot sys = sys_snapshot();
 
   // 汇总 report.json
   std::vector<double> ttft, total, e2e;
@@ -256,7 +258,10 @@ Stats Pipeline::run(double duration_s) {
       << "  \"observations_consumed\": " << stats_.observations_consumed << ",\n"
       << "  \"observations_dropped\": "
       << (stats_.observations_published - stats_.observations_consumed) << ",\n"
-      << "  \"frames_while_llm_busy\": " << stats_.frames_while_llm_busy << "\n"
+      << "  \"frames_while_llm_busy\": " << stats_.frames_while_llm_busy << ",\n"
+      << "  \"process\": {\"rss_mb\": " << sys.rss_mb << ", \"hwm_mb\": " << sys.hwm_mb
+      << ", \"cpu_total_ms\": " << sys.cpu_ms << ", \"temp_c\": " << sys.temp_c
+      << ", \"npu_mhz\": " << sys.npu_mhz << "}\n"
       << "}\n";
   rep.close();
   return stats_;

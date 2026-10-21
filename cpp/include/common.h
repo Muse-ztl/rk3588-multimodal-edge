@@ -21,6 +21,14 @@ struct Timing {
   double head_ms = 0.0;
   double postprocess_ms = 0.0;
   double total_ms = 0.0;
+  // backbone 内部拆分：灌输入 / NPU / 取输出
+  double rknn_in_ms = 0.0;
+  double rknn_run_ms = 0.0;
+  double rknn_out_ms = 0.0;
+  double copy_out_ms = 0.0;
+  // head 内部拆分：NHWC→NCHW 转置 / ORT
+  double transpose_ms = 0.0;
+  double ort_ms = 0.0;
 };
 
 struct Observation {
