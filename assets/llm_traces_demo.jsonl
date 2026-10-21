@@ -1,3 +1,3 @@
-{"frame_id":1,"text":"**高危警报！人员密集区存在安全隐患。**","ttft_ms":1501.2,"total_ms":6025.3,"e2e_ms":6029.8,"risk_level":"danger"}
-{"frame_id":81,"text":"人员密集且部分区域存在安全风险。","ttft_ms":1297.5,"total_ms":4390.6,"e2e_ms":4425.6,"risk_level":"danger"}
-{"frame_id":137,"text":"人员密集区域，人车距离过近，请注意安全。","ttft_ms":1359.4,"total_ms":3700.7,"e2e_ms":3844.0,"risk_level":"danger"}
+{"frame_id":1,"text":"**高危警报！人员密集区存在安全隐患。**","ttft_ms":1718.0,"total_ms":7187.3,"e2e_ms":7192.1,"risk_level":"danger"}
+{"frame_id":101,"text":"人员密集区域存在安全风险，请注意。","ttft_ms":1508.0,"total_ms":5451.3,"e2e_ms":5482.9,"risk_level":"danger"}
+{"frame_id":177,"text":"区域存在高危情况，请注意安全。","ttft_ms":277.7,"total_ms":1143.4,"e2e_ms":1167.9,"risk_level":"danger"}

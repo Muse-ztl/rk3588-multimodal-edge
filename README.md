@@ -13,6 +13,7 @@
 - RF-DETR-Nano 拆成两段：DINOv2 backbone 走 RKNN / NPU，Transformer 和检测头走 CPU 上的 ONNX Runtime
 - 规则层判断"人员进入危险区 / 人车过近 / 人员聚集"，LLM 只负责把确定的事实讲成人话
 - CV 线程和 LLM 线程异步，观测只保留最新一条，预警不会越积越旧
+- RKNN 输入输出走零拷贝；`--no-zero-copy` 可以切回旧路径做 A/B
 
 ## 跑起来
 
@@ -45,42 +46,47 @@ cmake --build build -j4
   --out ../output --stride 4 --core-mask 1 --cv-cores 0,1,2,3 --no-loop
 ```
 
-单图基准：`./build/mm_edge --bench 10 --image ../data/sample.jpg ...`
+单图基准：`./build/mm_edge --bench 10 --image ../data/sample.jpg ...`，`--bench-json` 落盘。
 
 ## 实测
 
-Orange Pi 5 Pro（RK3588S，16GB），CV 绑 A55、backbone 绑 NPU core0，stride=4：
+Orange Pi 5 Pro（RK3588S，16GB），CV 绑 A55、backbone 绑 NPU core0，`sample.jpg` 跑 200 次：
 
-| 阶段 | 数值 |
-|---|---|
-| Backbone（NPU） | 222 ms p50 / 238 ms p95 |
-| Transformer + 检测头（CPU 4 线程） | 42 ms p50 / 47 ms p95 |
-| 单帧检测 | 279 ms p50 / 297 ms p95 |
-| LLM 首 token | 1.36 s p50（3 次：1.50 / 1.30 / 1.36） |
-| 单次生成 | 4.39 s p50（3 次：6.03 / 4.39 / 3.70） |
-| 端到端 | 4.43 s p50 |
+| 阶段 | 原版 p50 | 零拷贝 p50 |
+|---|---|---|
+| Backbone（NPU） | 188.4 ms | 188.6 ms |
+| Transformer + 检测头（CPU 4 线程） | 39.7 ms | 38.7 ms |
+| 输入 + 输出拷贝 | 5.7 ms | 0.7 ms |
+| 单帧 | 242.1 ms（p95 333.2） | **235.0 ms（p95 314.4）** |
 
-180 帧视频、45 次推理、3 次 LLM 调用；期间丢掉 42 条观测，说明单槽背压确实在工作。
-原始数据在 `assets/report_demo.json`，三句预警在 `assets/llm_traces_demo.jsonl`。
+I/O 省掉约 5ms 以后，瓶颈很清楚：backbone 占单帧的 78%，继续抠拷贝没有意义。
+fp16 backbone 和 ONNX 参考的数值对齐：余弦 0.9998，相对 L2 1.9%，最大绝对误差 1.04（离群点）。
+
+完整流水线（180 帧、45 次推理、3 次 LLM 调用）：CV 单帧 263ms、3.7 fps；
+LLM 首 token p50 1.5s，端到端 p50 5.5s。LLM 波动比 CV 大，三次调用在
+`assets/llm_traces_demo.jsonl`，原始 report 在 `assets/report_demo.json`。
+零拷贝前后的 raw JSON 在 `assets/bench_baseline.json`、`assets/bench_zerocopy.json`。
 
 ## 目录
 
 ```
-cpp/             板端 C++ 实现
-  src/           rfdetr_split / scene / llm / pipeline / main
-  tests/         x86 单测（规则、Prompt、统计、JSON）
-scripts/         x86 侧导出和转换
-assets/          实测 report、LLM 输出、演示帧
-docs/NOTES.md    实现细节和测量口径
+cpp/                  板端 C++ 实现
+  src/                rfdetr_split / scene / llm / pipeline / main
+  tests/              x86 单测（规则、Prompt、统计、JSON）
+scripts/              x86 侧导出和转换；板端数值对齐脚本
+assets/               实测 report、bench JSON、LLM 输出
+docs/OPTIMIZATION.md  零拷贝、数值对齐和瓶颈分析
+docs/NOTES.md         实现细节
 ```
 
 ## 限制
 
 - 演示素材是合成的，不含真实监控画面
-- 检测头是 ORT 动态量化，backbone 是 FP16，都没做 QAT
+- 检测头是 ORT 动态量化，backbone 是 FP16，都没做 QAT；backbone INT8 还没跑
 - LLM 是 Qwen2.5-1.5B 的 w8a8；w4a16 转换流程在 `docs/quantize_w4a16.md`，没有在板上跑
 - 只处理一路视频，不接摄像头流，也不做多轮对话
+- NPU 跑 backbone 时 CPU 跑 head，两段还没做流水线重叠
 
 ## 更多
 
-拆分推理的原因、线程绑核、Prompt 压缩这些内容在 `docs/NOTES.md`。
+拆分推理、线程绑核、零拷贝和数值对齐分别在 `docs/NOTES.md`、`docs/OPTIMIZATION.md`。

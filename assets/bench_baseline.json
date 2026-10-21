@@ -1,0 +1,10 @@
+{
+  "image": "data/sample.jpg",
+  "backbone": "models/backbone.rknn",
+  "head": "models/detection.onnx",
+  "runs": 201,
+  "detect_ms": {"p50": 242.09, "p95": 333.22, "mean": 254.94},
+  "stages_p50_ms": {"preprocess": 3.84, "rknn_input": 4.09, "rknn_run": 188.38, "rknn_get": 1.44, "copy_out": 0.24, "transpose": 0.14, "ort": 39.68, "postprocess": 0.26},
+  "system": {"rss_mb": 197.14, "hwm_mb": 218.81, "cpu_util_pct": 83.12, "temp_c": 43.46, "npu_mhz": 1000.00, "cpu_mhz": 2352.00},
+  "detections": 5
+}
