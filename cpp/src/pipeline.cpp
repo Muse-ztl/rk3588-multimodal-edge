@@ -13,25 +13,12 @@
 #include <sched.h>
 #endif
 
+#include "json.h"
 #include "scene.h"
+#include "stats.h"
 
 namespace mm {
 namespace {
-
-double pct(std::vector<double> v, double p) {
-  if (v.empty()) return 0.0;
-  std::sort(v.begin(), v.end());
-  const size_t idx = static_cast<size_t>(std::min(1.0, std::max(0.0, p / 100.0)) *
-                                         (v.size() - 1));
-  return v[idx];
-}
-
-double mean(const std::vector<double>& v) {
-  if (v.empty()) return 0.0;
-  double s = 0;
-  for (double x : v) s += x;
-  return s / v.size();
-}
 
 std::string pin_cores(const std::vector<int>& cores) {
 #if defined(__linux__)
@@ -143,6 +130,19 @@ void Pipeline::cv_loop(double duration_s) {
     obs.frame_id = frame_id;
     obs.ts = now_s();
 
+    ++stats_.infer_frames;
+    const Timing& t = detector_.timing();
+    stats_.cv_ms.push_back(t.total_ms);
+    stats_.npu_ms.push_back(t.backbone_ms);
+    stats_.head_ms.push_back(t.head_ms);
+
+    // 先用本地 obs 画图，再发布到槽位；直接读 slot_ 会和 LLM 线程抢同一个对象
+    if (stats_.infer_frames % viz_every_ == 0) {
+      std::ostringstream name;
+      name << "frame_" << std::setw(5) << std::setfill('0') << frame_id << ".jpg";
+      dump_viz(frame, obs, name.str());
+    }
+
     {
       std::lock_guard<std::mutex> lock(slot_mtx_);
       slot_ = std::move(obs);
@@ -151,18 +151,6 @@ void Pipeline::cv_loop(double duration_s) {
       ++stats_.observations_published;
     }
     slot_cv_.notify_one();
-
-    ++stats_.infer_frames;
-    const Timing& t = detector_.timing();
-    stats_.cv_ms.push_back(t.total_ms);
-    stats_.npu_ms.push_back(t.backbone_ms);
-    stats_.head_ms.push_back(t.head_ms);
-
-    if (stats_.infer_frames % viz_every_ == 0) {
-      std::ostringstream name;
-      name << "frame_" << std::setw(5) << std::setfill('0') << frame_id << ".jpg";
-      dump_viz(frame, slot_, name.str());
-    }
   }
   cap.release();
 }
@@ -214,9 +202,10 @@ void Pipeline::llm_loop() {
     }
 
     std::ostringstream line;
-    line << "{\"frame_id\":" << tr.frame_id << ",\"text\":\"" << tr.text << "\",\"ttft_ms\":"
-         << std::fixed << std::setprecision(1) << tr.ttft_ms << ",\"total_ms\":" << tr.total_ms
-         << ",\"e2e_ms\":" << tr.e2e_ms << ",\"risk_level\":\"" << tr.risk_level << "\"}";
+    line << "{\"frame_id\":" << tr.frame_id << ",\"text\":\"" << json_escape(tr.text)
+         << "\",\"ttft_ms\":" << std::fixed << std::setprecision(1) << tr.ttft_ms
+         << ",\"total_ms\":" << tr.total_ms << ",\"e2e_ms\":" << tr.e2e_ms
+         << ",\"risk_level\":\"" << tr.risk_level << "\"}";
     trace_file_ << line.str() << "\n";
     trace_file_.flush();
     printf("[llm] frame=%ld risk=%s ttft=%.0fms total=%.0fms | %s\n", tr.frame_id,
@@ -245,18 +234,24 @@ Stats Pipeline::run(double duration_s) {
       << "  \"affinity\": \"" << stats_.affinity << "\",\n"
       << "  \"frames_read\": " << stats_.frames_read << ",\n"
       << "  \"infer_frames\": " << stats_.infer_frames << ",\n"
-      << "  \"cv_total_p50_ms\": " << pct(stats_.cv_ms, 50) << ",\n"
-      << "  \"cv_total_p90_ms\": " << pct(stats_.cv_ms, 90) << ",\n"
-      << "  \"backbone_npu_p50_ms\": " << pct(stats_.npu_ms, 50) << ",\n"
-      << "  \"head_cpu_p50_ms\": " << pct(stats_.head_ms, 50) << ",\n"
+      << "  \"cv_total_p50_ms\": " << percentile(stats_.cv_ms, 50) << ",\n"
+      << "  \"cv_total_p90_ms\": " << percentile(stats_.cv_ms, 90) << ",\n"
+      << "  \"cv_total_p95_ms\": " << percentile(stats_.cv_ms, 95) << ",\n"
+      << "  \"backbone_npu_p50_ms\": " << percentile(stats_.npu_ms, 50) << ",\n"
+      << "  \"backbone_npu_p95_ms\": " << percentile(stats_.npu_ms, 95) << ",\n"
+      << "  \"head_cpu_p50_ms\": " << percentile(stats_.head_ms, 50) << ",\n"
+      << "  \"head_cpu_p95_ms\": " << percentile(stats_.head_ms, 95) << ",\n"
       << "  \"cv_fps_effective\": " << (stats_.cv_ms.empty() ? 0.0 : 1000.0 / mean(stats_.cv_ms))
       << ",\n"
       << "  \"llm_calls\": " << stats_.llm_calls << ",\n"
-      << "  \"llm_ttft_p50_ms\": " << pct(ttft, 50) << ",\n"
-      << "  \"llm_total_p50_ms\": " << pct(total, 50) << ",\n"
-      << "  \"llm_total_p90_ms\": " << pct(total, 90) << ",\n"
-      << "  \"e2e_p50_ms\": " << pct(e2e, 50) << ",\n"
-      << "  \"e2e_p90_ms\": " << pct(e2e, 90) << ",\n"
+      << "  \"llm_ttft_p50_ms\": " << percentile(ttft, 50) << ",\n"
+      << "  \"llm_ttft_p95_ms\": " << percentile(ttft, 95) << ",\n"
+      << "  \"llm_total_p50_ms\": " << percentile(total, 50) << ",\n"
+      << "  \"llm_total_p90_ms\": " << percentile(total, 90) << ",\n"
+      << "  \"llm_total_p95_ms\": " << percentile(total, 95) << ",\n"
+      << "  \"e2e_p50_ms\": " << percentile(e2e, 50) << ",\n"
+      << "  \"e2e_p90_ms\": " << percentile(e2e, 90) << ",\n"
+      << "  \"e2e_p95_ms\": " << percentile(e2e, 95) << ",\n"
       << "  \"observations_published\": " << stats_.observations_published << ",\n"
       << "  \"observations_consumed\": " << stats_.observations_consumed << ",\n"
       << "  \"observations_dropped\": "

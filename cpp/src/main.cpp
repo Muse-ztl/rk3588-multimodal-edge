@@ -4,6 +4,7 @@
 //   --bench N        只跑检测基准（配合 --image）
 //   --image PATH     单图推理
 //   --duration SEC   限制运行时长（0 = 跑完整段视频）
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -17,6 +18,7 @@
 #include "llm.h"
 #include "pipeline.h"
 #include "rfdetr_split.h"
+#include "stats.h"
 
 namespace {
 
@@ -113,14 +115,13 @@ int run_bench(const Args& a) {
     pre.push_back(t.preprocess_ms);
     post.push_back(t.postprocess_ms);
   }
-  auto p50 = [](std::vector<double> v) {
-    if (v.empty()) return 0.0;
-    std::sort(v.begin(), v.end());
-    return v[v.size() / 2];
-  };
-  printf("[bench] %d runs  backbone_npu=%.1fms  head_cpu=%.1fms  pre=%.1fms  post=%.1fms  total=%.1fms\n",
-         a.bench, p50(npu), p50(head), p50(pre), p50(post), p50(total));
-  printf("[bench] %zu detections:", dets.size());
+  printf("[bench] %d runs  backbone_npu=%.1f/%.1fms  head_cpu=%.1f/%.1fms  "
+         "pre=%.1fms  post=%.1fms  total=%.1f/%.1fms (p50/p95)\n",
+         a.bench, mm::percentile(npu, 50), mm::percentile(npu, 95),
+         mm::percentile(head, 50), mm::percentile(head, 95), mm::percentile(pre, 50),
+         mm::percentile(post, 50), mm::percentile(total, 50), mm::percentile(total, 95));
+  printf("[bench] %.1f fps, %zu detections:", 1000.0 / std::max(1e-6, mm::percentile(total, 50)),
+         dets.size());
   for (size_t i = 0; i < dets.size() && i < 6; ++i) {
     printf(" %s(%.2f)", dets[i].label.c_str(), dets[i].score);
   }
